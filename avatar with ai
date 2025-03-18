@@ -1,0 +1,245 @@
+import os
+os.system('cls' if os.name == 'nt' else 'clear')
+import cv2
+import numpy as np
+import pygame
+import time
+import pyttsx3
+import threading
+import speech_recognition as sr
+from PIL import Image, ImageSequence
+import io
+import base64
+import pygetwindow as gw
+import pyautogui
+import time
+import torch
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
+
+# Φόρτωση GPT-2
+
+model_name = "gpt2"
+tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+tokenizer.pad_token = tokenizer.eos_token  # Χρήση του eos_token ως pad_token
+gpt2_model = GPT2LMHeadModel.from_pretrained(model_name)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+gpt2_model.to(device)
+
+def generate_text(prompt, max_new_tokens=50):
+    inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    input_ids = inputs.input_ids.to(device)
+    attention_mask = inputs.attention_mask.to(device)
+
+    output = gpt2_model.generate(
+        input_ids,
+        attention_mask=attention_mask,
+        max_new_tokens=max_new_tokens,
+        num_return_sequences=1,
+        no_repeat_ngram_size=1,
+        do_sample=True,
+        top_k=50,
+        top_p=0.90,
+        temperature=0.8,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id
+    )
+    raw_text = tokenizer.decode(output[0], skip_special_tokens=True)
+    lines = raw_text.split("\n")
+    filtered_lines = []
+    for line in lines:
+        if line.strip().startswith("User:") or line.strip().startswith("AI:"):
+            continue
+        filtered_lines.append(line)
+    final_text = " ".join(filtered_lines).strip()
+    return final_text
+
+def build_prompt(conversation_history, new_user_input):
+    system_message = (
+        "You are beautiful.\n\n")
+    dialogue = ""
+    for i, msg in enumerate(conversation_history):
+        role = "User" if i % 2 == 0 else "AI"
+        dialogue += f"{role}: {msg}\n"
+    dialogue += f"User: {new_user_input}\nAI:"
+    return system_message + dialogue
+
+# Ρυθμίσεις αναγνώρισης φωνής
+
+recognizer = sr.Recognizer()
+mic = sr.Microphone()
+
+def listen():
+    with mic as source:
+        print("🎤 Speak now...")
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+        try:
+            audio = recognizer.listen(source, timeout=5)
+            print("✅ Audio Captured!")
+        except sr.WaitTimeoutError:
+            print("⏳ No speech detected. Try again.")
+            return None
+
+    try:
+        text = recognizer.recognize_google(audio, language="en-US")
+        print(f"✅ Recognition: {text}")
+        return text
+    except sr.UnknownValueError:
+        print("🤖 Could not understand.")
+    except sr.RequestError:
+        print("❌ Connection error.")
+    return None
+
+# Ρυθμίσεις text-to-speech
+
+engine = pyttsx3.init()
+engine_lock = threading.Lock()
+voices = engine.getProperty('voices')
+female_voice_id = None
+for voice in voices:
+    name_lower = voice.name.lower()
+    if "female" in name_lower or "zira" in name_lower:
+        female_voice_id = voice.id
+        break
+if female_voice_id:
+    engine.setProperty('voice', female_voice_id)
+else:
+    print("❌ No female-like voice found. Using default.")
+def speak(text):
+    with engine_lock:
+        engine.say(text)
+        engine.runAndWait()
+
+# Φόρτωση avatar GIF (Pygame)
+
+def create_avatar_animation(image_path):
+    if not os.path.exists(image_path):
+        print(f"❌ File {image_path} not found!")
+        exit()
+    gif = Image.open(image_path)
+    frames = [
+        pygame.image.fromstring(frame.convert("RGBA").tobytes(), frame.size, "RGBA")
+        for frame in ImageSequence.Iterator(gif)]
+    return frames
+image_path = r"C:\Users\tsifa\Desktop\avatar 111.webp"
+avatar_frames = create_avatar_animation(image_path)
+frame_index = 0
+
+# Pygame / Παράθυρο
+
+pygame.init()
+pygame.font.init()
+window_open = False
+running = True
+avatar_text = "Hello! How can I help you?"
+
+def bring_window_to_front():
+    time.sleep(0.5)
+    win = gw.getWindowsWithTitle("AI Assistant")  
+    if win:
+        win[0].activate()  
+        pyautogui.click(win[0].left + 10, win[0].top + 10) 
+
+def update_avatar_text(new_text):
+    global avatar_text
+    avatar_text = new_text
+    pygame.event.post(pygame.event.Event(pygame.USEREVENT))
+
+def show_avatar():
+    global window_open, running, frame_index, avatar_text
+    if window_open:
+        return
+    window_open = True
+    screen = pygame.display.set_mode((500, 500))
+    pygame.display.set_caption("AI Assistant")
+    font = pygame.font.SysFont("Arial", 24)
+    bring_window_to_front()
+
+    while running:
+        screen.fill((0, 0, 0))
+        text_surface = font.render(avatar_text, True, (155, 155, 155))
+        screen.blit(text_surface, (50, 450))
+        current_frame = avatar_frames[frame_index]
+        screen.blit(pygame.transform.scale(current_frame, (400, 400)), (50, 50))
+        pygame.display.update()
+        frame_index = (frame_index + 1) % len(avatar_frames)
+        time.sleep(0.1)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                print("🛑 Exiting program...")
+                running = False
+                pygame.quit()
+                os._exit(0)
+
+# Συνομιλία (βρόχος)
+
+def conversation_loop():
+    global running
+    conversation_context = []
+    initial_message = "Hello! How can I help you?"
+    print(f"🤖 AI: {initial_message}")
+    update_avatar_text(initial_message)
+    speak(initial_message)
+    while running:
+        print("🎤 Waiting for user input...")
+        user_input = listen()
+        if user_input is None:
+            print("🔄 No input detected. Listening again...")
+            continue
+        if user_input.lower() in ["quit", "exit", "stop"]:
+            print("🛑 Exiting...")
+            running = False
+            pygame.event.post(pygame.event.Event(pygame.QUIT))
+            break
+        prompt = build_prompt(conversation_context, user_input)
+        ai_response = generate_text(prompt)
+        print(f"📝 User: {user_input}")
+        print(f"🤖 AI: {ai_response}")
+        update_avatar_text(ai_response)
+        speak(ai_response)
+        conversation_context.append(user_input)   
+        conversation_context.append(ai_response) 
+        if len(conversation_context) > 6:
+            conversation_context = conversation_context[-6:]
+
+# Ανίχνευση κίνησης μέσω κάμερας
+
+def detect_motion(threshold=5000):
+    cap = cv2.VideoCapture(0)
+    time.sleep(2) 
+    ret, frame1 = cap.read()
+    ret, frame2 = cap.read()
+    print("🔍 Waiting for motion...")
+    motion_detected = False
+    while True:
+        diff = cv2.absdiff(frame1, frame2)
+        gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, thresh = cv2.threshold(blur, 20, 255, cv2.THRESH_BINARY)
+        dilated = cv2.dilate(thresh, None, iterations=3)
+        contours, _ = cv2.findContours(dilated, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        total_area = sum(cv2.contourArea(contour) for contour in contours)
+        if total_area > threshold:
+            print("🚨 Motion detected! Starting program...")
+            motion_detected = True
+            break
+        frame1 = frame2
+        ret, frame2 = cap.read()
+        if not ret:
+            break
+        if cv2.waitKey(10) & 0xFF == ord('q'):
+            break
+    cap.release()
+    cv2.destroyAllWindows()
+    return motion_detected
+
+# Αναμονή ανίχνευσης κίνησης πριν την εκκίνηση
+
+if detect_motion():
+    conversation_thread = threading.Thread(target=conversation_loop)
+    conversation_thread.start()
+    show_avatar()
+    conversation_thread.join()
+else:
+    print("❌ Motion detection failed or interrupted.")
+
+
